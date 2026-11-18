@@ -1,117 +1,319 @@
-import streamlit as st
-st.markdown(
-    '<meta name="google-site-verification" content="Z41xRLdLVq0nCp4U4ldVdDXPD8xfep6HaInWZylIVa8" />',
-    unsafe_allow_html=True
-)
+
 import streamlit as st
 import sqlite3
+import os
 import uuid
+import base64
+from datetime import datetime
 from pathlib import Path
 
+import requests
+
+try:
+    from streamlit_mic_recorder import speech_to_text
+    VOICE_AVAILABLE = True
+except ImportError:
+    VOICE_AVAILABLE = False
+
 # =====================================
-# BREVINFLIX CONFIGURATION
+# CONFIGURATION
 # =====================================
-
-BASE_DIR = Path(__file__).resolve().parent
-MEDIA_DIR = BASE_DIR / "media"
-MOVIE_DIR = MEDIA_DIR / "Movies"
-POSTER_DIR = MEDIA_DIR / "Posters"
-DB_PATH = BASE_DIR / "movies.db"
-
-ADMIN_PASSWORD = st.secrets["ADMIN_PASSWORD"]
-
-for folder in [MOVIE_DIR, POSTER_DIR]:
-    folder.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(
     page_title="BREVINFLIX",
-    page_icon="🎬",
+    page_icon="­ƒÄ¼",
     layout="wide"
 )
+
+BASE_DIR = Path(__file__).parent
+MEDIA_DIR = BASE_DIR / "media"
+MEDIA_DIR.mkdir(exist_ok=True)
+
+DB_PATH = BASE_DIR / "brevinflix_new.db"
+
+try:
+    ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "")
+except Exception:
+    ADMIN_PASSWORD = ""
+
+# =====================================
+# COLOURFUL DESIGN
+# =====================================
+
+st.markdown("""
+<style>
+.stApp {
+    background: linear-gradient(
+        135deg, #090018, #16052e, #071b38, #090018
+    );
+    color: white;
+}
+
+header[data-testid="stHeader"] {
+    background: transparent;
+}
+
+h1 {
+    color: #ff4fd8 !important;
+    font-weight: 900 !important;
+    text-shadow: 0 0 18px #a020f0;
+}
+
+h2 {
+    color: #00e5ff !important;
+    font-weight: 800 !important;
+}
+
+h3 {
+    color: #ffd166 !important;
+}
+
+p, label {
+    color: #f5f5ff;
+}
+
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #210044, #101d4b);
+}
+
+.stButton button {
+    background: linear-gradient(
+        90deg, #ff1744, #a020f0, #007bff
+    );
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-weight: bold;
+    min-height: 40px;
+}
+
+.stButton button:hover {
+    background: linear-gradient(90deg, #ffd166, #ff4fd8);
+    color: #090018;
+}
+
+input, textarea {
+    background: #20143b !important;
+    color: white !important;
+    border: 1px solid #a020f0 !important;
+    border-radius: 10px !important;
+}
+
+[data-testid="stImage"] {
+    border-radius: 14px;
+}
+
+hr {
+    border-color: #a020f0;
+}
+
+div[data-testid="stMetric"] {
+    background: #21123c;
+    padding: 15px;
+    border-radius: 12px;
+    border: 1px solid #a020f0;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # =====================================
 # DATABASE
 # =====================================
 
-def initialize_database():
-    with sqlite3.connect(DB_PATH) as conn:
+def connect():
+    return sqlite3.connect(DB_PATH)
+
+def setup_database():
+    with connect() as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS movies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                genre TEXT,
-                year INTEGER,
-                description TEXT,
-                content_type TEXT,
-                poster TEXT,
-                video TEXT
-            )
+        CREATE TABLE IF NOT EXISTS movies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            genre TEXT,
+            year TEXT,
+            description TEXT,
+            poster TEXT,
+            trailer TEXT,
+            video_url TEXT DEFAULT '',
+            is_premium INTEGER DEFAULT 0
+        )
         """)
 
-def get_movies(content_type=None):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+        columns = [
+            row[1] for row in
+            conn.execute("PRAGMA table_info(movies)").fetchall()
+        ]
 
-        if content_type:
+        if "video_url" not in columns:
+            conn.execute(
+                "ALTER TABLE movies ADD COLUMN video_url TEXT DEFAULT ''"
+            )
+
+        if "is_premium" not in columns:
+            conn.execute(
+                "ALTER TABLE movies ADD COLUMN is_premium INTEGER DEFAULT 0"
+            )
+
+setup_database()
+
+# =====================================
+# MOVIE FUNCTIONS
+# =====================================
+
+def get_movies(category=None):
+    with connect() as conn:
+        if category:
             rows = conn.execute(
-                "SELECT * FROM movies WHERE content_type=? ORDER BY id DESC",
-                (content_type,)
+                """SELECT * FROM movies
+                WHERE category=?
+                ORDER BY id DESC""",
+                (category,)
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM movies ORDER BY id DESC"
             ).fetchall()
 
-        return [dict(row) for row in rows]
+    return [
+        {
+            "id": r[0],
+            "title": r[1],
+            "category": r[2],
+            "genre": r[3],
+            "year": r[4],
+            "description": r[5],
+            "poster": r[6],
+            "trailer": r[7],
+            "video_url": r[8],
+            "is_premium": r[9]
+        }
+        for r in rows
+    ]
 
-def save_movie(title, genre, year, description,
-               content_type, poster, video):
-
-    poster_name = f"{uuid.uuid4().hex}{Path(poster.name).suffix.lower()}"
-    video_name = f"{uuid.uuid4().hex}{Path(video.name).suffix.lower()}"
-
-    (POSTER_DIR / poster_name).write_bytes(poster.getvalue())
-    (MOVIE_DIR / video_name).write_bytes(video.getvalue())
-
-    with sqlite3.connect(DB_PATH) as conn:
+def add_movie(
+    title, category, genre, year,
+    description, poster, trailer,
+    video_url, is_premium
+):
+    with connect() as conn:
         conn.execute("""
-            INSERT INTO movies
-            (title, genre, year, description,
-             content_type, poster, video)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO movies
+        (title, category, genre, year, description,
+         poster, trailer, video_url, is_premium)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            title, genre, year, description,
-            content_type, poster_name, video_name
+            title, category, genre, year,
+            description, poster, trailer,
+            video_url, is_premium
         ))
 
 def delete_movie(movie_id):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-
-        movie = conn.execute(
-            "SELECT * FROM movies WHERE id=?",
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM movies WHERE id=?",
             (movie_id,)
-        ).fetchone()
-
-        if movie:
-            for folder, filename in [
-                (POSTER_DIR, movie["poster"]),
-                (MOVIE_DIR, movie["video"])
-            ]:
-                if filename:
-                    path = folder / filename
-                    if path.exists():
-                        path.unlink()
-
-            conn.execute(
-                "DELETE FROM movies WHERE id=?",
-                (movie_id,)
-            )
-
-initialize_database()
+        )
 
 # =====================================
-# SESSION
+# M-PESA DARAJA SANDBOX HELPERS
+# =====================================
+
+def get_mpesa_config():
+    """Read sandbox credentials from Streamlit Secrets; never hard-code them."""
+    try:
+        return {
+            "consumer_key": st.secrets.get("MPESA_CONSUMER_KEY", ""),
+            "consumer_secret": st.secrets.get("MPESA_CONSUMER_SECRET", ""),
+            "shortcode": st.secrets.get("MPESA_SHORTCODE", ""),
+            "passkey": st.secrets.get("MPESA_PASSKEY", ""),
+            "callback_url": st.secrets.get("MPESA_CALLBACK_URL", ""),
+        }
+    except Exception:
+        return {
+            "consumer_key": "", "consumer_secret": "",
+            "shortcode": "", "passkey": "", "callback_url": ""
+        }
+
+
+def mpesa_access_token(config):
+    response = requests.get(
+        "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+        auth=(config["consumer_key"], config["consumer_secret"]),
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()["access_token"]
+
+
+def normalize_kenyan_phone(phone):
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if digits.startswith("0") and len(digits) == 10:
+        return "254" + digits[1:]
+    if digits.startswith("254") and len(digits) == 12:
+        return digits
+    if digits.startswith("7") and len(digits) == 9:
+        return "254" + digits
+    raise ValueError("Enter a valid Kenyan number, e.g. 0712345678.")
+
+
+def send_mpesa_stk(phone, amount, plan, config):
+    if not config["callback_url"].startswith("https://"):
+        raise ValueError(
+            "A public HTTPS callback URL is required. The callback receiver "
+            "must be deployed before STK Push can be tested."
+        )
+
+    token = mpesa_access_token(config)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    password_raw = config["shortcode"] + config["passkey"] + timestamp
+    password = base64.b64encode(password_raw.encode("utf-8")).decode("utf-8")
+    payload = {
+        "BusinessShortCode": config["shortcode"],
+        "Password": password,
+        "Timestamp": timestamp,
+        "TransactionType": "CustomerPayBillOnline",
+        "Amount": int(amount),
+        "PartyA": phone,
+        "PartyB": config["shortcode"],
+        "PhoneNumber": phone,
+        "CallBackURL": config["callback_url"],
+        "AccountReference": "BREVINFLIX",
+        "TransactionDesc": plan,
+    }
+    response = requests.post(
+        "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def query_mpesa_stk(checkout_request_id, config):
+    token = mpesa_access_token(config)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    password_raw = config["shortcode"] + config["passkey"] + timestamp
+    password = base64.b64encode(password_raw.encode("utf-8")).decode("utf-8")
+    payload = {
+        "BusinessShortCode": config["shortcode"],
+        "Password": password,
+        "Timestamp": timestamp,
+        "CheckoutRequestID": checkout_request_id,
+    }
+    response = requests.post(
+        "https://sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+# =====================================
+# SESSION SETTINGS
 # =====================================
 
 if "favourites" not in st.session_state:
@@ -120,81 +322,93 @@ if "favourites" not in st.session_state:
 if "selected_movie" not in st.session_state:
     st.session_state.selected_movie = None
 
-if "admin_authenticated" not in st.session_state:
-    st.session_state.admin_authenticated = False
+if "membership" not in st.session_state:
+    st.session_state.membership = "Free"
 
-# =====================================
-# DESIGN
-# =====================================
+if "search_query" not in st.session_state:
+    st.session_state.search_query = ""
 
-st.markdown("""
-<style>
-.stApp {
-    background: #050b18;
-    color: white;
-}
-
-[data-testid="stSidebar"] {
-    background: #071329;
-}
-
-h1 {
-    color: #48a9ff !important;
-    font-weight: 900;
-}
-
-h2, h3, p, label {
-    color: white;
-}
-
-.hero {
-    background: linear-gradient(100deg,#071329,#123b70,#071329);
-    padding: 40px;
-    border-radius: 18px;
-    margin-bottom: 25px;
-}
-
-div.stButton > button {
-    background: #0878d1;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    width: 100%;
-}
-
-div.stButton > button:hover {
-    background: #159aff;
-    color: white;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# =====================================
-# SIDEBAR
-# =====================================
-
-st.sidebar.markdown("# 🔵 BREVINFLIX")
-st.sidebar.caption("YOUR WORLD OF ENTERTAINMENT")
-
-page = st.sidebar.radio(
-    "NAVIGATION",
-    [
-        "Home",
-        "Movies",
-        "TV Shows",
-        "My List",
-        "Search",
-        "Admin Dashboard",
-        "About"
-    ]
-)
+if "last_voice" not in st.session_state:
+    st.session_state.last_voice = ""
 
 # =====================================
 # HEADER
 # =====================================
 
-st.title("BREVINFLIX")
-st.caption("STREAM YOUR WORLD.")
+st.title("­ƒÄ¼ BREVINFLIX")
+
+st.markdown(
+    "### Your entertainment destination"
+)
+
+st.markdown("""
+<div style="
+background:linear-gradient(90deg,#e50914,#a020f0,#007bff);
+padding:3px;
+border-radius:20px;
+"></div>
+""", unsafe_allow_html=True)
+
+# =====================================
+# NAVIGATION
+# =====================================
+
+page = st.sidebar.radio(
+    "­ƒîƒ NAVIGATION",
+    [
+        "Home",
+        "Movies",
+        "TV Shows",
+        "Favourites",
+        "Membership",
+        "Admin"
+    ]
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ­ƒæñ YOUR ACCOUNT")
+st.sidebar.write("Plan:", st.session_state.membership)
+
+# =====================================
+# VOICE SEARCH
+# =====================================
+
+st.subheader("­ƒöÄ Find your next movie")
+
+if VOICE_AVAILABLE:
+    voice_text = speech_to_text(
+        language="en",
+        start_prompt="­ƒÄÖ´©Å Speak your movie title",
+        stop_prompt="ÔÅ╣´©Å Stop recording",
+        just_once=True,
+        key="voice_search"
+    )
+
+    if voice_text and voice_text != st.session_state.last_voice:
+        st.session_state.search_query = voice_text
+        st.session_state.last_voice = voice_text
+else:
+    st.caption("Voice search is unavailable. Install streamlit-mic-recorder.")
+
+search = st.text_input(
+    "Search movies, genres or descriptions",
+    placeholder="Try Moana, action, comedy...",
+    key="search_query"
+)
+
+# =====================================
+# SEARCH RESULTS
+# =====================================
+
+all_movies = get_movies()
+
+if search:
+    all_movies = [
+        m for m in all_movies
+        if search.lower() in m["title"].lower()
+        or search.lower() in (m["genre"] or "").lower()
+        or search.lower() in (m["description"] or "").lower()
+    ]
 
 # =====================================
 # MOVIE DISPLAY
@@ -203,48 +417,102 @@ st.caption("STREAM YOUR WORLD.")
 def show_movies(movie_list):
 
     if not movie_list:
-        st.info("No movies available yet.")
+        st.info("No movies found. Try another search.")
         return
 
-    cols = st.columns(3)
+    columns = st.columns(4)
 
-    for i, movie in enumerate(movie_list):
+    for index, movie in enumerate(movie_list):
 
-        with cols[i % 3]:
+        with columns[index % 4]:
 
-            poster = movie.get("poster")
+            poster = movie["poster"]
 
-            if poster and (POSTER_DIR / poster).exists():
+            if poster and os.path.isfile(poster):
                 st.image(
-                    str(POSTER_DIR / poster),
+                    poster,
                     use_container_width=True
                 )
             else:
-                st.markdown("🎬 Poster unavailable")
+                st.markdown(
+                    "­ƒÄ¼ **Poster unavailable**"
+                )
 
-            st.subheader(movie["title"])
+            st.markdown("**" + movie["title"] + "**")
 
             st.caption(
-                f'{movie.get("genre")} • {movie.get("year")}'
+                str(movie["year"] or "") +
+                " ÔÇó " +
+                str(movie["genre"] or "")
             )
 
+            if movie["is_premium"]:
+                st.caption("­ƒöÆ PREMIUM")
+
             if st.button(
-                "▶ WATCH NOW",
-                key=f"watch_{page}_{movie['id']}"
+                "View details",
+                key=f"view_{movie['id']}"
             ):
                 st.session_state.selected_movie = movie
 
+            fav_label = (
+                "ÔÖÑ Remove favourite"
+                if movie["id"] in st.session_state.favourites
+                else "ÔÖí Add favourite"
+            )
+
             if st.button(
-                "♡ ADD TO MY LIST",
-                key=f"fav_{page}_{movie['id']}"
+                fav_label,
+                key=f"fav_{movie['id']}"
             ):
-                if movie["id"] not in [
-                    m["id"] for m in st.session_state.favourites
-                ]:
-                    st.session_state.favourites.append(movie)
-                    st.success("Added to favourites!")
+                if movie["id"] in st.session_state.favourites:
+                    st.session_state.favourites.remove(movie["id"])
                 else:
-                    st.info("Already added.")
+                    st.session_state.favourites.append(movie["id"])
+
+                st.rerun()
+
+# =====================================
+# MOVIE DETAILS
+# =====================================
+
+if st.session_state.selected_movie:
+
+    movie = st.session_state.selected_movie
+
+    st.markdown("---")
+    st.header("­ƒÄÑ " + movie["title"])
+
+    if movie["poster"] and os.path.isfile(movie["poster"]):
+        st.image(movie["poster"], width=250)
+
+    st.write("**Category:**", movie["category"])
+    st.write("**Genre:**", movie["genre"])
+    st.write("**Year:**", movie["year"])
+
+    st.write(movie["description"])
+
+    can_watch = (
+        not movie["is_premium"]
+        or st.session_state.membership in ["Premium", "VIP"]
+    )
+
+    if movie["is_premium"] and not can_watch:
+        st.warning("­ƒöÆ This title is reserved for Premium members.")
+        st.info("Visit Membership to explore the available plans.")
+
+    elif movie["video_url"]:
+        st.video(movie["video_url"])
+
+    if movie["trailer"]:
+        st.link_button(
+            "ÔûÂ Watch official trailer",
+            movie["trailer"]
+        )
+
+    if st.button("Close details"):
+        st.session_state.selected_movie = None
+        st.rerun()
 
 # =====================================
 # HOME
@@ -253,16 +521,28 @@ def show_movies(movie_list):
 if page == "Home":
 
     st.markdown("""
-    <div class="hero">
-        <h2>WELCOME TO BREVINFLIX</h2>
-        <p>Discover movies and amazing entertainment.</p>
-        <p>🎬 MOVIES • 📺 TV SHOWS • ⭐ ENTERTAINMENT</p>
+    <div style="
+    background:linear-gradient(120deg,#e50914,#6a00f4,#007bff);
+    padding:35px;
+    border-radius:18px;
+    ">
+    <h1 style="color:white!important;">
+    WELCOME TO BREVINFLIX
+    </h1>
+    <h3 style="color:white!important;">
+    Discover movies and amazing entertainment.
+    </h3>
+    <p>­ƒÄ¼ MOVIES ÔÇó ­ƒô║ TV SHOWS ÔÇó Ô¡É ENTERTAINMENT</p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.header("🔥 Recently Added")
+    st.subheader("­ƒöÑ Latest additions")
+    show_movies(all_movies[:8])
 
-    show_movies(get_movies()[:6])
+    st.subheader("Ô¡É Explore more")
+    st.write(
+        "Discover movies, browse TV shows and explore membership options."
+    )
 
 # =====================================
 # MOVIES
@@ -270,8 +550,14 @@ if page == "Home":
 
 elif page == "Movies":
 
-    st.header("🎬 MOVIE LIBRARY")
-    show_movies(get_movies("Movie"))
+    st.header("­ƒÄ¼ Movies")
+
+    results = [
+        m for m in all_movies
+        if m["category"] == "Movie"
+    ]
+
+    show_movies(results)
 
 # =====================================
 # TV SHOWS
@@ -279,284 +565,304 @@ elif page == "Movies":
 
 elif page == "TV Shows":
 
-    st.header("📺 TV SHOWS")
-    show_movies(get_movies("TV Show"))
+    st.header("­ƒô║ TV Shows")
+
+    results = [
+        m for m in all_movies
+        if m["category"] == "TV Show"
+    ]
+
+    show_movies(results)
 
 # =====================================
-# MY LIST
+# FAVOURITES
 # =====================================
 
-elif page == "My List":
+elif page == "Favourites":
 
-    st.header("❤️ MY FAVOURITES")
-    show_movies(st.session_state.favourites)
+    st.header("ÔØñ´©Å My Favourites")
+
+    results = [
+        m for m in get_movies()
+        if m["id"] in st.session_state.favourites
+    ]
+
+    show_movies(results)
 
 # =====================================
-# SEARCH
+# MEMBERSHIP
 # =====================================
 
-elif page == "Search":
+elif page == "Membership":
 
-    st.header("🔍 SEARCH BREVINFLIX")
+    st.header("BREVINFLIX MEMBERSHIPS")
+    st.write("Choose the entertainment experience you want.")
 
-    search = st.text_input("Search movies or genres")
+    col1, col2, col3 = st.columns(3)
 
-    if search:
-        results = [
-            m for m in get_movies()
-            if search.lower() in m["title"].lower()
-            or search.lower() in (m["genre"] or "").lower()
-        ]
+    with col1:
+        st.markdown("## FREE")
+        st.markdown("### KSh 0")
+        st.write("Browse the catalogue")
+        st.write("Search movies")
+        st.write("Save favourites")
+        if st.button("Choose Free", key="free"):
+            st.session_state.membership = "Free"
+            st.success("Free plan selected.")
+            st.rerun()
 
-        show_movies(results)
+    with col2:
+        st.markdown("## PREMIUM")
+        st.markdown("### KSh 299/month")
+        st.write("Premium catalogue")
+        st.write("Premium member features")
+        st.write("Licensed content where available")
+        if st.button("Select Premium", key="premium"):
+            st.session_state.mpesa_plan = "Premium"
+            st.session_state.mpesa_amount = 299
+
+    with col3:
+        st.markdown("## VIP")
+        st.markdown("### KSh 499/month")
+        st.write("Premium features")
+        st.write("VIP member badge")
+        st.write("Priority support")
+        if st.button("Select VIP", key="vip"):
+            st.session_state.mpesa_plan = "VIP"
+            st.session_state.mpesa_amount = 499
+
+    st.markdown("---")
+    st.subheader("M-Pesa sandbox checkout")
+    st.warning(
+        "TEST MODE ONLY. This connects to Safaricom's Daraja sandbox, "
+        "not live customer payments. Do not enter your M-Pesa PIN here."
+    )
+
+    config = get_mpesa_config()
+    if not all(config.values()):
+        st.info(
+            "Sandbox credentials and a publicly reachable HTTPS callback "
+            "URL have not been configured. Keep these values private in "
+            "Streamlit Secrets; never paste them into this chat or source code."
+        )
     else:
-        st.info("Enter a movie title or genre.")
+        selected_plan = st.session_state.get("mpesa_plan", "")
+        selected_amount = st.session_state.get("mpesa_amount", 0)
+        if selected_plan:
+            st.write(f"Selected plan: **{selected_plan} — KSh {selected_amount}**")
+            phone_input = st.text_input(
+                "Safaricom test phone number",
+                placeholder="0712345678",
+                key="mpesa_phone",
+            )
+            if st.button("Send sandbox STK Push", key="send_mpesa_stk"):
+                try:
+                    phone = normalize_kenyan_phone(phone_input)
+                    result = send_mpesa_stk(
+                        phone, selected_amount, selected_plan, config
+                    )
+                    if result.get("ResponseCode") == "0":
+                        st.session_state.mpesa_checkout_request_id = result.get(
+                            "CheckoutRequestID", ""
+                        )
+                        st.success(
+                            "Sandbox STK request submitted. Check the Daraja "
+                            "sandbox response and use the status check below."
+                        )
+                        st.caption(result.get("CustomerMessage", "Request submitted."))
+                    else:
+                        st.error(result.get("errorMessage", str(result)))
+                except Exception as exc:
+                    st.error(f"Sandbox request could not be sent: {exc}")
+
+        checkout_id = st.session_state.get("mpesa_checkout_request_id", "")
+        if checkout_id:
+            st.caption("A sandbox request is pending. Membership is not active yet.")
+            if st.button("Check sandbox payment status", key="check_mpesa_status"):
+                try:
+                    result = query_mpesa_stk(checkout_id, config)
+                    result_code = str(result.get("ResultCode", ""))
+                    if result_code == "0":
+                        st.session_state.membership = st.session_state.get(
+                            "mpesa_plan", "Free"
+                        )
+                        st.success(
+                            "Daraja sandbox reports success for this test request. "
+                            "This temporary session membership is for testing only."
+                        )
+                        st.rerun()
+                    elif result_code:
+                        st.warning(
+                            "Daraja returned a non-success result: "
+                            + str(result.get("ResultDesc", result))
+                        )
+                    else:
+                        st.info(
+                            "No final result yet. Wait a little and check again."
+                        )
+                except Exception as exc:
+                    st.error(f"Could not check sandbox status: {exc}")
+
+    st.markdown("---")
+    st.subheader("Current demo membership")
+    st.success(st.session_state.membership)
+    st.caption(
+        "This app does not include a deployed callback receiver or permanent "
+        "payment ledger. Do not use it to collect real customer payments. "
+        "Production payments need a secure HTTPS backend, verified callbacks, "
+        "persistent subscription records, and an eligible merchant account."
+    )
+
 
 # =====================================
-# ADMIN DASHBOARD
+# ADMIN
 # =====================================
 
-elif page == "Admin Dashboard":
+elif page == "Admin":
 
-    st.header("🔐 ADMIN DASHBOARD")
+    st.header("­ƒöÉ ADMIN DASHBOARD")
 
-    if not st.session_state.admin_authenticated:
+    if not ADMIN_PASSWORD:
+        st.error(
+            "Admin password is not configured. "
+            "Set ADMIN_PASSWORD in Streamlit Secrets."
+        )
+
+    else:
 
         password = st.text_input(
-            "Admin Password",
+            "Admin password",
             type="password"
         )
 
-        if st.button("LOGIN"):
+        if password == ADMIN_PASSWORD:
 
-            if password == ADMIN_PASSWORD:
-                st.session_state.admin_authenticated = True
-                st.rerun()
-            else:
-                st.error("Incorrect password!")
+            st.success("Admin access granted!")
 
-    else:
+            st.subheader("Ô×ò Add a movie or TV show")
 
-        if st.button("LOG OUT"):
-            st.session_state.admin_authenticated = False
-            st.rerun()
+            with st.form("add_movie_form"):
 
-        st.success("Administrator access granted!")
+                title = st.text_input("Movie title")
 
-        content = get_movies()
+                category = st.selectbox(
+                    "Category",
+                    ["Movie", "TV Show"]
+                )
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Content", len(content))
-        col2.metric("Movies", len([
-            m for m in content if m["content_type"] == "Movie"
-        ]))
-        col3.metric("TV Shows", len([
-            m for m in content if m["content_type"] == "TV Show"
-        ]))
+                genre = st.text_input("Genre")
+                year = st.text_input("Release year")
 
-        st.divider()
-        st.subheader("➕ ADD NEW MOVIE OR SHOW")
+                description = st.text_area(
+                    "Movie description"
+                )
 
-        with st.form("upload_form"):
+                poster = st.file_uploader(
+                    "Upload movie poster",
+                    type=["jpg", "jpeg", "png", "webp"]
+                )
 
-            title = st.text_input("Title")
+                trailer = st.text_input(
+                    "Official trailer link"
+                )
 
-            content_type = st.selectbox(
-                "Content Type",
-                ["Movie", "TV Show"]
-            )
+                video_url = st.text_input(
+                    "Licensed video URL (optional)"
+                )
 
-            genre = st.selectbox(
-                "Genre",
-                [
-                    "Action",
-                    "Adventure",
-                    "Animation",
-                    "Comedy",
-                    "Drama",
-                    "Documentary",
-                    "Fantasy",
-                    "Horror",
-                    "Romance",
-                    "Science Fiction",
-                    "Other"
-                ]
-            )
+                is_premium = st.checkbox(
+                    "Mark as Premium content"
+                )
 
-            year = st.number_input(
-                "Release Year",
-                min_value=1900,
-                max_value=2100,
-                value=2026
-            )
+                submitted = st.form_submit_button(
+                    "Add to BREVINFLIX"
+                )
 
-            description = st.text_area("Description")
+                if submitted:
 
-            poster = st.file_uploader(
-                "Upload Movie Poster",
-                type=["jpg", "jpeg", "png", "webp"]
-            )
+                    if not title.strip():
+                        st.error("Enter a movie title.")
 
-            video = st.file_uploader(
-                "Upload Movie Video",
-                type=["mp4", "mov", "m4v", "webm"]
-            )
+                    elif not poster:
+                        st.error("Upload a poster.")
 
-            submit = st.form_submit_button("SAVE TO BREVINFLIX")
+                    else:
 
-            if submit:
+                        extension = Path(
+                            poster.name
+                        ).suffix.lower()
 
-                if not title.strip():
-                    st.error("Please enter a title.")
-
-                elif not poster:
-                    st.error("Please upload a poster.")
-
-                elif not video:
-                    st.error("Please upload a video.")
-
-                else:
-                    try:
-                        save_movie(
-                            title.strip(),
-                            genre,
-                            int(year),
-                            description,
-                            content_type,
-                            poster,
-                            video
+                        filename = (
+                            str(uuid.uuid4()) + extension
                         )
 
-                        st.success("Movie uploaded successfully!")
+                        poster_path = MEDIA_DIR / filename
+
+                        with open(poster_path, "wb") as file:
+                            file.write(poster.getbuffer())
+
+                        add_movie(
+                            title.strip(),
+                            category,
+                            genre,
+                            year,
+                            description,
+                            str(poster_path),
+                            trailer,
+                            video_url,
+                            int(is_premium)
+                        )
+
+                        st.success(
+                            title + " added successfully!"
+                        )
+
                         st.rerun()
 
-                    except Exception as error:
-                        st.error(f"Upload failed: {error}")
+            st.markdown("---")
 
-        st.divider()
-        st.subheader("🗂 MANAGE YOUR CONTENT")
+            st.subheader("­ƒùæ´©Å Manage movies")
 
-        for movie in get_movies():
+            for movie in get_movies():
 
-            with st.expander(movie["title"]):
+                col1, col2 = st.columns([4, 1])
 
-                st.write(movie["description"])
+                with col1:
+                    st.write(
+                        movie["title"] +
+                        " (" + movie["category"] + ")"
+                    )
 
-                if st.button(
-                    f"DELETE {movie['title']}",
-                    key=f"delete_{movie['id']}"
-                ):
-                    delete_movie(movie["id"])
+                with col2:
 
-                    st.session_state.favourites = [
-                        m for m in st.session_state.favourites
-                        if m["id"] != movie["id"]
-                    ]
-
-                    if (
-                        st.session_state.selected_movie
-                        and st.session_state.selected_movie["id"]
-                        == movie["id"]
+                    if st.button(
+                        "Delete",
+                        key=f"delete_{movie['id']}"
                     ):
-                        st.session_state.selected_movie = None
 
-                    st.success("Deleted successfully!")
-                    st.rerun()
+                        delete_movie(movie["id"])
 
-# =====================================
-# ABOUT
-# =====================================
+                        if (
+                            movie["poster"]
+                            and os.path.isfile(movie["poster"])
+                        ):
+                            os.remove(movie["poster"])
 
-elif page == "About":
+                        st.rerun()
 
-    st.header("ABOUT BREVINFLIX")
-
-    st.write("""
-    BREVINFLIX is your personal entertainment platform.
-
-    Built with Python and Streamlit.
-
-    Your local movie library is stored on your computer.
-    """)
-
-# =====================================
-# VIDEO PLAYER
-# =====================================
-
-if st.session_state.selected_movie:
-
-    movie = st.session_state.selected_movie
-
-    st.divider()
-    st.header("▶ NOW PLAYING")
-    st.subheader(movie["title"])
-
-    st.write(movie["description"])
-
-    video = movie.get("video")
-
-    if video and (MOVIE_DIR / video).exists():
-        st.video(str(MOVIE_DIR / video))
-    else:
-        st.warning("Video unavailable.")
-
-    if st.button("✖ CLOSE PLAYER"):
-        st.session_state.selected_movie = None
-        st.rerun()
+        elif password:
+            st.error("Incorrect admin password.")
 
 # =====================================
 # FOOTER
 # =====================================
 
-st.divider()
-st.caption("BREVINFLIX © 2026 | YOUR WORLD OF ENTERTAINMENT")
-
+st.markdown("---")
 
 st.markdown("""
-<style>
-.stApp {
-    background: #080808;
-    color: white;
-}
-
-header[data-testid="stHeader"] {
-    background: #080808;
-}
-
-h1, h2, h3, p, label {
-    color: white;
-}
-
-h1 {
-    font-size: 42px !important;
-    font-weight: 900 !important;
-}
-
-.stButton button {
-    background: #e50914;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    font-weight: bold;
-}
-
-.stButton button:hover {
-    background: #b20710;
-    color: white;
-}
-
-input, textarea {
-    background: #202020 !important;
-    color: white !important;
-}
-
-[data-testid="stSidebar"] {
-    background: #111111;
-}
-
-[data-testid="stImage"] {
-    border-radius: 12px;
-}
-
-</style>
+<div style="text-align:center;padding:15px;">
+<h3>­ƒÄ¼ BREVINFLIX</h3>
+<p>Movies ÔÇó TV Shows ÔÇó Entertainment</p>
+<p>┬® BREVINFLIX</p>
+</div>
 """, unsafe_allow_html=True)
