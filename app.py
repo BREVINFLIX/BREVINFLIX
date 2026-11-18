@@ -1,4 +1,8 @@
-
+import streamlit as st
+st.markdown(
+    '<meta name="google-site-verification" content="Z41xRLdLVq0nCp4U4ldVdDXPD8xfep6HaInWZylIVa8" />',
+    unsafe_allow_html=True
+)
 import streamlit as st
 import sqlite3
 import uuid
