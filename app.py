@@ -510,3 +510,53 @@ if st.session_state.selected_movie:
 
 st.divider()
 st.caption("BREVINFLIX © 2026 | YOUR WORLD OF ENTERTAINMENT")
+
+
+st.markdown("""
+<style>
+.stApp {
+    background: #080808;
+    color: white;
+}
+
+header[data-testid="stHeader"] {
+    background: #080808;
+}
+
+h1, h2, h3, p, label {
+    color: white;
+}
+
+h1 {
+    font-size: 42px !important;
+    font-weight: 900 !important;
+}
+
+.stButton button {
+    background: #e50914;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: bold;
+}
+
+.stButton button:hover {
+    background: #b20710;
+    color: white;
+}
+
+input, textarea {
+    background: #202020 !important;
+    color: white !important;
+}
+
+[data-testid="stSidebar"] {
+    background: #111111;
+}
+
+[data-testid="stImage"] {
+    border-radius: 12px;
+}
+
+</style>
+""", unsafe_allow_html=True)
